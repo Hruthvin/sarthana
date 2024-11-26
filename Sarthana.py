@@ -4,17 +4,9 @@ from PyPDF2 import PdfReader
 import sqlite3
 from googletrans import Translator
 from gtts import gTTS
-import openai
-import os
+from transformers import pipeline
 import tempfile
 import random
-
-# Set OpenAI API Key
-openai.api_key = 'your_openai_api_key_here'  # Replace with your OpenAI API key
-
-# News API Key
-API_KEY = "pub_60208bd691345e57519b7d614bf21139f26f7"
-BASE_URL = "https://newsdata.io/api/1/news"
 
 # Database Setup
 conn = sqlite3.connect("upsc_app.db")
@@ -25,56 +17,59 @@ conn.commit()
 # Initialize Translator for multilingual support
 translator = Translator()
 
-# Prelims Questions
-def get_mock_test_questions():
-    """Fetch UPSC Prelims questions for Mock Test"""
-    prelims_questions = [
-        {
-            "question": "Which Article of the Indian Constitution guarantees the Right to Equality?",
-            "options": ["Article 14", "Article 19", "Article 21", "Article 25"],
-            "answer": "Article 14"
-        },
-        {
-            "question": "The concept of 'Carbon Credit' originated from which protocol?",
-            "options": ["Kyoto Protocol", "Montreal Protocol", "Geneva Protocol", "Nagoya Protocol"],
-            "answer": "Kyoto Protocol"
-        },
-        {
-            "question": "Which Indian river is also known as the 'Sorrow of Bihar'?",
-            "options": ["Ganga", "Kosi", "Yamuna", "Brahmaputra"],
-            "answer": "Kosi"
-        },
-        {
-            "question": "What is the primary objective of the Green Revolution?",
-            "options": ["Increase food grain production", "Afforestation", "Soil conservation", "Irrigation development"],
-            "answer": "Increase food grain production"
-        },
-        # Add more questions here...
-    ]
-    return random.sample(prelims_questions, k=min(len(prelims_questions), 100))  # Ensure a max of 100 questions
-
 # Helper Functions
 def fetch_news(category):
     """Fetch news based on category using News API"""
+    NEWS_API_KEY = "pub_60208bd691345e57519b7d614bf21139f26f7"
+    NEWS_API_URL = "https://newsdata.io/api/1/news"
     params = {
-        "apikey": API_KEY,
+        "apikey": NEWS_API_KEY,
         "country": "in",
         "language": "en",
         "category": category,
     }
     try:
-        response = requests.get(BASE_URL, params=params)
+        response = requests.get(NEWS_API_URL, params=params)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching news: {e}")
         return {}
 
+def text_to_speech(text, lang_code="en"):
+    """Convert text to speech and play it"""
+    tts = gTTS(text=text, lang=lang_code)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
+        tts.save(temp_audio.name)
+        st.audio(temp_audio.name, format="audio/mp3")
+
+def generate_mock_questions_from_text(text):
+    """Generate random questions from text using Transformers"""
+    question_generator = pipeline("text2text-generation", model="valhalla/t5-small-qg-prepend")
+    try:
+        questions = question_generator(
+            f"generate questions: {text}", max_length=512, num_return_sequences=10
+        )
+        mock_test = []
+        for q in questions:
+            question_text = q['generated_text']
+            options = [
+                "Option A",
+                "Option B",
+                "Option C",
+                "Correct Answer"
+            ]
+            random.shuffle(options)
+            mock_test.append((question_text, options, options[-1]))
+        return mock_test
+    except Exception as e:
+        return f"Error during question generation: {e}"
+
 # Streamlit App
 st.title("UPSC Preparation Hub")
 
 # Tabbed Interface
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📢 Current Affairs", "📚 Topic Summarization", "📝 Mock Tests", "💡 Saved Notes", "📝 Essay Feedback"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📢 Current Affairs", "📚 Topic Summarization", "📝 Mock Tests", "💡 Saved Notes", "📝 Essay Writing"])
 
 # 1. Current Affairs
 with tab1:
@@ -86,7 +81,7 @@ with tab1:
         news_data = fetch_news(category)
         if "results" in news_data:
             st.subheader(f"News for {category.capitalize()}:")
-            for article in news_data["results"][:5]:  # Display top 5 articles
+            for article in news_data["results"][:5]:
                 st.write(f"**{article['title']}**")
                 st.write(article.get("description", "No description available."))
                 st.write(f"[Read more]({article['link']})")
@@ -110,37 +105,42 @@ with tab2:
         st.write("**Extracted Text:**")
         st.write(text)
 
+        if st.button("Summarize"):
+            try:
+                summary_pipeline = pipeline("summarization")
+                summary = summary_pipeline(text, max_length=150, min_length=30, do_sample=False)
+                summarized_text = summary[0]['summary_text']
+                st.write("**Summary:**")
+                st.write(summarized_text)
+                lang_code = {"English": "en", "Telugu": "te", "Hindi": "hi", "Tamil": "ta", "Marathi": "mr"}.get(lang, "en")
+                if st.button("Play Summary"):
+                    text_to_speech(summarized_text, lang_code)
+            except Exception as e:
+                st.error(f"Error summarizing the text: {e}")
+
 # 3. Mock Test
 with tab3:
     st.header("Mock Test")
+    uploaded_file = st.file_uploader("Upload a PDF for Mock Test", type=["pdf"])
+    if uploaded_file:
+        pdf = PdfReader(uploaded_file)
+        text = " ".join(page.extract_text() for page in pdf.pages)
 
-    questions = get_mock_test_questions()
-    score = 0
-    answers = []
-    for i, q in enumerate(questions):
-        st.subheader(f"Q{i+1}: {q['question']}")
-        user_answer = st.radio("Options", q["options"], key=f"q{i}")
-        answers.append({"question": q['question'], "user_answer": user_answer, "correct_answer": q['answer']})
-        if user_answer == q["answer"]:
-            score += 1
+        st.write("**Extracted Text for Questions:**")
+        st.write(text)
 
-    if st.button("Submit Quiz"):
-        st.write(f"Your score: {score}/{len(questions)}")
-        
-        # Feedback on the score
-        if score >= 90:
-            st.success("Excellent performance! Keep it up.")
-        elif score >= 70:
-            st.info("Good job! You’re doing well, but there’s room for improvement.")
-        else:
-            st.warning("Don't worry, keep practicing! Focus on weak areas.")
-
-        # Displaying answers and feedback
-        for ans in answers:
-            st.write(f"Question: {ans['question']}")
-            st.write(f"Your answer: {ans['user_answer']}")
-            st.write(f"Correct answer: {ans['correct_answer']}")
-            st.write("---")
+        if st.button("Generate Mock Test"):
+            mock_questions = generate_mock_questions_from_text(text)
+            if isinstance(mock_questions, str):
+                st.error(mock_questions)
+            else:
+                st.write("### Mock Test")
+                for idx, (question, options, correct_answer) in enumerate(mock_questions, 1):
+                    st.write(f"**Q{idx}. {question}**")
+                    for option in options:
+                        st.write(f"- {option}")
+                    st.write(f"*Answer:* {correct_answer}")
+                    st.write("---")
 
 # 4. Saved Notes
 with tab4:
@@ -155,10 +155,14 @@ with tab4:
     else:
         st.write("No saved notes yet.")
 
-# 5. Essay Feedback
+# 5. Essay Writing
 with tab5:
-    st.header("Essay Feedback")
-    essay_text = st.text_area("Write your essay here...", height=200)
-
-    if st.button("Evaluate Essay"):
-        st.write("Essay evaluation feature will be added soon.")
+    st.header("Essay Writing (UPSC Mains Preparation)")
+    essay_text = st.text_area("Write your essay here...", height=200, max_chars=1500)
+    if st.button("Submit Essay"):
+        if len(essay_text.split()) < 1000:
+            st.warning("Your essay is too short! Please aim for at least 1000 words.")
+        elif len(essay_text.split()) > 1200:
+            st.warning("Your essay is too long! Please limit it to 1200 words.")
+        else:
+            st.success("Essay submitted successfully!")
